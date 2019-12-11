@@ -18,10 +18,11 @@ from discriminator_trainer import DiscriminatorTrainer
 @click.option('--model_dir', default='models/default')
 @click.option('--epochs', default=100)
 @click.option('--batch_size', default=128)
+@click.option('--lr', default=0.01)
 @click.option('--eval_every', default=50)
 @click.option('--generate_every', default=100)
 @click.option('--num_workers', default=4)
-def main(model_dir, epochs, batch_size, eval_every, generate_every, num_workers):
+def main(model_dir, epochs, batch_size, lr, eval_every, generate_every, num_workers):
 
     datasets = {'train': Celebs(db_path='datasets/train_db', transform=transform_train),
                 'val': LFW(path='datasets/lfw.bin', transform=transform_val)}
@@ -40,6 +41,7 @@ def main(model_dir, epochs, batch_size, eval_every, generate_every, num_workers)
     trainer_generator = Trainer(model_dir='mobiface_generator_mse',
                                 g_optimizer=FusedAdam,
                                 d_optimizer=FusedSGD,
+                                lr=lr,
                                 num_classes=datasets['train'].num_classes)
     
     # trainer_discriminator = DiscriminatorTrainer(model_dir='checkpoints/mobiface_airface_ce',
