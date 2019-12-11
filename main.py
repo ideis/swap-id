@@ -11,7 +11,7 @@ from apex.optimizers import FusedSGD, FusedAdam
 from data.faces import LFW
 from data.faces import Celebs
 from data.transforms import transform_train, transform_val
-from generator_trainer import GeneratorTrainer
+from trainer import Trainer 
 from discriminator_trainer import DiscriminatorTrainer
 
 @click.command()
@@ -37,10 +37,10 @@ def main(model_dir, epochs, batch_size, eval_every, generate_every, num_workers)
                                      shuffle=False,
                                      num_workers=num_workers)}
 
-    trainer_generator = GeneratorTrainer(model_dir='mobiface_generator_mse',
-                      g_optimizer=FusedAdam,
-                      d_optimizer=FusedSGD,
-                      num_classes=datasets['train'].num_classes)
+    trainer_generator = Trainer(model_dir='mobiface_generator_mse',
+                                g_optimizer=FusedAdam,
+                                d_optimizer=FusedSGD,
+                                num_classes=datasets['train'].num_classes)
     
     # trainer_discriminator = DiscriminatorTrainer(model_dir='checkpoints/mobiface_airface_ce',
     #                                optimizer=FusedSGD,
