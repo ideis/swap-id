@@ -117,6 +117,7 @@ class Discriminator(nn.Module):
             ConvBNPReLU(256, 512, kernel_size=1),
             ConvBN(512, 512, kernel_size=7, groups=512),
             nn.Flatten(1),
+            nn.Dropout(p=0.25),
             nn.Linear(512, 513)
         )
         self.metric = AirMargin(num_classes)
