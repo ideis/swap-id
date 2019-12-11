@@ -18,7 +18,7 @@ from model.generator import Generator
 from model.discriminator import Discriminator
 
 class Trainer(nn.Module):
-    def __init__(self, model_dir, g_optimizer, d_optimizer, num_classes):
+    def __init__(self, model_dir, g_optimizer, d_optimizer, lr, num_classes):
         super().__init__()
         self.model_dir = model_dir
         if not os.path.exists(f'checkpoints/{model_dir}'):
@@ -38,12 +38,13 @@ class Trainer(nn.Module):
         self.ce_criterion = nn.CrossEntropyLoss()
         self.mae_weight = 1
         self.bce_weight = 1
-        self.ce_weight = 1
+        self.ce_weight = 0.01
         self.bce_real_weight = 1
         self.bce_fake_weight = 1
 
-        self.g_optimizer = g_optimizer(self.generator.parameters(), lr=0.1)
-        self.d_optimizer = d_optimizer(self.discriminator.parameters(), lr=0.1, momentum=0.9)
+        self.lr = lr
+        self.g_optimizer = g_optimizer(self.generator.parameters(), lr=lr)
+        self.d_optimizer = d_optimizer(self.discriminator.parameters(), lr=lr, momentum=0.9)
 
         (self.generator, self.discriminator), (self.d_optimizer, self.g_optimizer) = amp.initialize([self.generator, self.discriminator],
                                                                                                     [self.g_optimizer, self.d_optimizer],
@@ -73,13 +74,13 @@ class Trainer(nn.Module):
         for batch in tqdm(dataloaders['train']):
             torch.Tensor.add_(self._iter, 1)
             # generator step
-            # self.adjust_lr(self.g_optimizer)
+            self.adjust_lr(self.g_optimizer)
             g_losses = self.g_step(self.adapt(batch))
             g_stats = self.get_opt_stats(self.g_optimizer, type='generator')
             self.write_logs(losses=g_losses, stats=g_stats)
 
             #discriminator step
-            # self.adjust_lr(self.d_optimizer)
+            self.adjust_lr(self.d_optimizer)
             d_losses = self.d_step(self.adapt(batch))
             d_stats = self.get_opt_stats(self.d_optimizer, type='discriminator')
             self.write_logs(losses=d_losses, stats=d_stats)
