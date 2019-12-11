@@ -11,13 +11,11 @@ class ConvBNReLU(nn.Module):
         self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
         self.bn = nn.InstanceNorm2d(out_channels, affine=True)
         self.relu = nn.LeakyReLU(negative_slope=0.01, inplace=False)
-        self.dropout = nn.Dropout(p=0.25)
     
     def forward(self, x):
         x = self.conv(x)
         x = self.bn(x)
         x = self.relu(x)
-        x = self.dropout(x)
         return x
 
 
@@ -121,6 +119,8 @@ class Generator(nn.Module):
         self.encoder = Encoder()
         self.decoder = Decoder()
 
+        self.init_parameters()
+
     def forward(self, src, tgt):
         x = self.encoder(src, tgt)
         x = self.decoder(x)
@@ -128,3 +128,14 @@ class Generator(nn.Module):
         res = torch.tanh(res)
         mask = torch.sigmoid(mask)
         return res, mask
+
+    def init_parameters(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out')
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.ones_(m.weight)
+                nn.init.zeros_(m.bias)
+
