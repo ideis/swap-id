@@ -3,6 +3,8 @@ from torchvision.transforms import *
 
 def transform_train(img):
     transform = Compose([
+        RandomHorizontalFlip(),
+        ColorJitter(brightness=0.125, contrast=0.125, saturation=0.125),
         ToTensor(),
         Normalize(mean=[0.5] * 3, std=[0.5] * 3)
     ])
