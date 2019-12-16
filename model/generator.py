@@ -81,15 +81,14 @@ class Bottleneck(nn.Module):
 class Encoder(nn.Module):
     def __init__(self, parallel_channels=128, concat_channels=256, parallel_blocks=4, concat_blocks=8):
         super().__init__()
-        self.src_downsampler = Downsampler()
-        self.tgt_downsampler = Downsampler()
+        self.downsampler = Downsampler()
         self.src_bottleneck = Bottleneck(parallel_channels, parallel_blocks)
         self.tgt_bottleneck = Bottleneck(parallel_channels, parallel_blocks)
         self.bottleneck = Bottleneck(concat_channels, concat_blocks)
 
     def forward(self, src, tgt):
-        src = self.src_downsampler(src)
-        tgt = self.tgt_downsampler(tgt)
+        src = self.downsampler(src)
+        tgt = self.downsampler(tgt)
         src = self.src_bottleneck(src)
         tgt = self.tgt_bottleneck(tgt)
         x = torch.cat([src, tgt], dim=1)
@@ -127,7 +126,8 @@ class Generator(nn.Module):
         res, mask = torch.split(x, 3, dim=1)
         res = torch.tanh(res)
         mask = torch.sigmoid(mask)
-        return res, mask
+        fake = mask * res + (1 - mask) * src
+        return fake
 
     def init_parameters(self):
         for m in self.modules():
