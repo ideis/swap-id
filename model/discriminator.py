@@ -41,7 +41,7 @@ class Block(nn.Module):
 
         self.block = nn.Sequential(
             ConvBNPReLU(in_channels, expand_channels, kernel_size=1),
-            ConvBNPReLU(expand_channels, expand_channels, kernel_size=3, stride=stride, padding = 1, groups=expand_channels),
+            ConvBNPReLU(expand_channels, expand_channels, kernel_size=3, stride=stride, padding=1, groups=expand_channels),
             ConvBN(expand_channels, out_channels, kernel_size=1)
         )
 
@@ -116,15 +116,16 @@ class Discriminator(nn.Module):
             *repeat(6, Block, in_channels=256, expand_channels=512, out_channels=256, residual=True),
             ConvBNPReLU(256, 512, kernel_size=1),
             ConvBN(512, 512, kernel_size=7, groups=512),
+            nn.Conv2d(512, 512, kernel_size=1),
             nn.Flatten(1),
-            nn.Dropout(p=0.25),
-            nn.Linear(512, 513)
         )
+        self.classifier = nn.Linear(512, 1)
         self.metric = AirMargin(num_classes)
         self.init_parameters()
      
     def forward(self, x, labels=None):
-        features, realness_logit = torch.split(self.backbone(x), [512, 1], dim=1)
+        features = self.backbone(x)
+        realness_logit = self.classifier(features)
         if torch.is_tensor(labels):
             logits = self.metric(features, labels)
             return logits, realness_logit
@@ -140,10 +141,3 @@ class Discriminator(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
-
-# x = torch.randn(2, 3, 112, 112)
-# y = torch.ones(2).long()
-# model = Discriminator(1000)
-# logits, realness_logit = model(x, y)
-# print(logits.shape)
-# print(realness_logit.shape)
