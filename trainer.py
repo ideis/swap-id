@@ -296,21 +296,21 @@ class Trainer(nn.Module):
     def load_discriminator(self, path, load_last=True):
         if load_last:
             try:
-                checkpoints = glob.glob(f'{path}/*.pt')
+                checkpoints = glob.glob(f'{path}/discriminator_*.pt')
                 path = max(checkpoints, key=os.path.getctime)
             except (ValueError):
                 print(f'Directory is empty: {path}')
 
         try:
             self.discriminator.load_state_dict(torch.load(path))
-            self.discriminator.cuda()
+            self.cuda()
         except (FileNotFoundError):
             print(f'No such file: {path}')
 
     def load_generator(self, path, load_last=True):
         if load_last:
             try:
-                checkpoints = glob.glob(f'{path}/*.pt')
+                checkpoints = glob.glob(f'{path}/generator_*.pt')
                 path = max(checkpoints, key=os.path.getctime)
             except (ValueError):
                 print(f'Directory is empty: {path}')
@@ -319,6 +319,6 @@ class Trainer(nn.Module):
             self.generator.load_state_dict(torch.load(path))
             iter_str = ''.join(filter(lambda x: x.isdigit(), path))
             self._iter = nn.Parameter(torch.tensor(int(iter_str)), requires_grad=False)
-            self.generator.cuda()
+            self.cuda()
         except (FileNotFoundError):
             print(f'No such file: {path}')
