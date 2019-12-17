@@ -37,14 +37,14 @@ def main(model_dir, epochs, batch_size, lr, eval_every, generate_every, save_eve
                                      shuffle=False,
                                      num_workers=num_workers)}
 
-    trainer = Trainer(model_dir='mobiface_generator_without_mae',
-                     g_optimizer=FusedSGD,
-                     d_optimizer=FusedSGD,
-                     lr=lr,
-                     num_classes=datasets['train'].num_classes)
+    trainer = Trainer(model_dir='mobiface_gan_mae',
+                      g_optimizer=FusedSGD,
+                      d_optimizer=FusedSGD,
+                      lr=lr,
+                      num_classes=datasets['train'].num_classes)
     
-    trainer.load_discriminator('checkpoints/mobiface_generator_without_mae', load_last=True)
-    trainer.load_generator('checkpoints/mobiface_generator_without_mae', load_last=True)
+    trainer.load_discriminator('checkpoints/mobiface_gan_mae', load_last=True)
+    trainer.load_generator('checkpoints/mobiface_gan_mae', load_last=True)
 
     for epoch in range(1, epochs + 1):
         trainer.train_loop(dataloaders, eval_every, generate_every, save_every)
