@@ -3,15 +3,14 @@ import glob
 import random
 from math import cos, pi
 from tqdm import tqdm
-from PIL import Image
 import numpy as np
 import sklearn.metrics as metrics
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from torch.utils.tensorboard import SummaryWriter
+
 from apex import amp
 from apex.optimizers import FusedAdam
 
@@ -38,11 +37,11 @@ class Trainer(nn.Module):
         self.mae_criterion = nn.SmoothL1Loss()
         self.bce_criterion = nn.BCEWithLogitsLoss()
         self.ce_criterion = nn.CrossEntropyLoss()
-        self.generator_mae_weight = 0
-        self.generator_bce_weight = 0.0001
+        self.generator_mae_weight = 0.0001
+        self.generator_bce_weight = 0.001
         self.generator_ce_weight = 1
-        self.discriminator_bce_real_weight = 0.0001
-        self.discriminator_bce_fake_weight = 0.0001
+        self.discriminator_bce_real_weight = 0.001
+        self.discriminator_bce_fake_weight = 0.001
         self.discriminator_ce_weight = 1
 
         self.lr = lr
@@ -52,7 +51,7 @@ class Trainer(nn.Module):
         (self.generator, self.discriminator), (self.g_optimizer, self.d_optimizer) = amp.initialize([self.generator, self.discriminator],
                                                                                                     [self.g_optimizer, self.d_optimizer],
                                                                                                     opt_level="O1",
-                                                                                                    num_losses=5)
+                                                                                                    num_losses=6)
 
         self._iter = nn.Parameter(torch.tensor(1), requires_grad=False)
         self.max_iters = 100000
@@ -111,8 +110,8 @@ class Trainer(nn.Module):
     def g_step(self, batch):
         self.g_optimizer.zero_grad()
         mae_loss, bce_loss, ce_loss = self.g_loss(*batch)
-        # with amp.scale_loss(mae_loss * self.generator_mae_weight, self.g_optimizer, loss_id=0) as scaled_loss:
-        #     scaled_loss.backward(retain_graph=True)
+        with amp.scale_loss(mae_loss * self.generator_mae_weight, self.g_optimizer, loss_id=0) as scaled_loss:
+            scaled_loss.backward(retain_graph=True)
         with amp.scale_loss(bce_loss * self.generator_bce_weight, self.g_optimizer, loss_id=0) as scaled_loss:
             scaled_loss.backward(retain_graph=True)
         with amp.scale_loss(ce_loss * self.generator_ce_weight, self.g_optimizer, loss_id=1) as scaled_loss:
@@ -120,7 +119,7 @@ class Trainer(nn.Module):
         self.g_optimizer.step()
 
         losses = {
-            # 'mae': self.generator_mae_weight * mae_loss.item(),
+            'mae': self.generator_mae_weight * mae_loss.item(),
             'bce_fake': self.generator_bce_weight * bce_loss.item(),
             'ce':  self.generator_ce_weight * ce_loss.item()
         }
