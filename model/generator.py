@@ -42,10 +42,11 @@ class UpsamplingBlock(nn.Module):
     def __init__(self, in_channels, out_channels):
         super().__init__()
         self.up = nn.UpsamplingNearest2d(scale_factor=2)
-        self.conv_bn_relu = ConvBNReLU(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.conv_bn_relu = ConvBNReLU(in_channels, out_channels, kernel_size=3, stride=1, padding=0)
 
     def forward(self, x):
         x = self.up(x)
+        x = F.pad(x, pad=[1, 1, 1, 1], mode='replicate')
         x = self.conv_bn_relu(x)
         return x
 
