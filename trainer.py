@@ -37,11 +37,11 @@ class Trainer(nn.Module):
         self.mae_criterion = nn.SmoothL1Loss()
         self.bce_criterion = nn.BCEWithLogitsLoss()
         self.ce_criterion = nn.CrossEntropyLoss()
-        self.generator_mae_weight = 0.0001
-        self.generator_bce_weight = 0.001
+        self.generator_mae_weight = 0.01
+        self.generator_bce_weight = 0.01
         self.generator_ce_weight = 1
-        self.discriminator_bce_real_weight = 0.001
-        self.discriminator_bce_fake_weight = 0.001
+        self.discriminator_bce_real_weight = 0.01
+        self.discriminator_bce_fake_weight = 0.01
         self.discriminator_ce_weight = 1
 
         self.lr = lr
@@ -96,7 +96,6 @@ class Trainer(nn.Module):
                 metrics = self.evaluate_identification(dataloaders)
                 self.write_logs(metrics=metrics)
 
-
             if self.iter % generate_every == 0:
                 x, labels = batch
                 x = x[:2, ...].cuda()
@@ -106,15 +105,14 @@ class Trainer(nn.Module):
                 self.save_discriminator()
                 self.save_generator()
 
-
     def g_step(self, batch):
         self.g_optimizer.zero_grad()
         mae_loss, bce_loss, ce_loss = self.g_loss(*batch)
         with amp.scale_loss(mae_loss * self.generator_mae_weight, self.g_optimizer, loss_id=0) as scaled_loss:
             scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(bce_loss * self.generator_bce_weight, self.g_optimizer, loss_id=0) as scaled_loss:
+        with amp.scale_loss(bce_loss * self.generator_bce_weight, self.g_optimizer, loss_id=1) as scaled_loss:
             scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(ce_loss * self.generator_ce_weight, self.g_optimizer, loss_id=1) as scaled_loss:
+        with amp.scale_loss(ce_loss * self.generator_ce_weight, self.g_optimizer, loss_id=2) as scaled_loss:
             scaled_loss.backward()
         self.g_optimizer.step()
 
@@ -128,11 +126,11 @@ class Trainer(nn.Module):
     def d_step(self, batch):
         self.d_optimizer.zero_grad()
         bce_fake, bce_real, ce_loss = self.d_loss(*batch)
-        with amp.scale_loss(bce_fake * self.discriminator_bce_fake_weight, self.d_optimizer, loss_id=2) as scaled_loss:
+        with amp.scale_loss(bce_fake * self.discriminator_bce_fake_weight, self.d_optimizer, loss_id=3) as scaled_loss:
             scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(bce_real * self.discriminator_bce_real_weight, self.d_optimizer, loss_id=3) as scaled_loss:
+        with amp.scale_loss(bce_real * self.discriminator_bce_real_weight, self.d_optimizer, loss_id=4) as scaled_loss:
             scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(ce_loss * self.discriminator_ce_weight, self.d_optimizer, loss_id=4) as scaled_loss:
+        with amp.scale_loss(ce_loss * self.discriminator_ce_weight, self.d_optimizer, loss_id=5) as scaled_loss:
             scaled_loss.backward()
         self.d_optimizer.step()
 
@@ -166,8 +164,7 @@ class Trainer(nn.Module):
         _, fake_realness_logit = self.discriminator(fake)
 
         bce_fake = self.bce_criterion(fake_realness_logit, torch.zeros_like(fake_realness_logit) + random.uniform(0.1, 0.3))
-        bce_real = self.bce_criterion(real_realness_logit, torch.ones_like(real_realness_logit) - random.uniform(0.1, 0.3)) / 2
-     
+        bce_real = self.bce_criterion(real_realness_logit, torch.ones_like(real_realness_logit) - random.uniform(0.1, 0.3))
         return bce_fake, bce_real, ce_loss
 
     def evaluate(self, x):
@@ -208,7 +205,6 @@ class Trainer(nn.Module):
             'real_acc': real_acc.item()
         }
         return metrics
-
     
     def evaluate_identification(self, dataloaders):
         self.discriminator.eval()
@@ -235,7 +231,6 @@ class Trainer(nn.Module):
         }
         return val_metrics
 
-
     def generate(self, x):
         src, tgt = torch.chunk(x, 2, dim=0)        
         x = torch.cat([src, tgt], dim=1)
@@ -251,7 +246,6 @@ class Trainer(nn.Module):
         if not os.path.exists(f'results/{self.model_dir}'):
             os.makedirs(f'results/{self.model_dir}')
         imgs.save(f'results/{self.model_dir}/{self.iter}.png')
-
 
     def get_opt_stats(self, optimizer, type=''):
         stats = {f'{type}_lr' : optimizer.param_groups[0]['lr']}
@@ -295,7 +289,7 @@ class Trainer(nn.Module):
     def load_discriminator(self, path, load_last=True):
         if load_last:
             try:
-                checkpoints = glob.glob(f'{path}/discriminator_*.pt')
+                checkpoints = glob.glob(f'{path}/discriminator*.pt')
                 path = max(checkpoints, key=os.path.getctime)
             except (ValueError):
                 print(f'Directory is empty: {path}')
@@ -309,7 +303,7 @@ class Trainer(nn.Module):
     def load_generator(self, path, load_last=True):
         if load_last:
             try:
-                checkpoints = glob.glob(f'{path}/generator_*.pt')
+                checkpoints = glob.glob(f'{path}/generator*.pt')
                 path = max(checkpoints, key=os.path.getctime)
             except (ValueError):
                 print(f'Directory is empty: {path}')
