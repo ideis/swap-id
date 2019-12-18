@@ -17,11 +17,14 @@ from trainer import Trainer
 @click.option('--epochs', default=100)
 @click.option('--batch_size', default=256)
 @click.option('--lr', default=0.05)
+@click.option('--momentum', default=0.9)
+@click.option('--warmup', default=1000)
+@click.option('--max_iters', default=100000)
 @click.option('--eval_every', default=200)
 @click.option('--generate_every', default=500)
 @click.option('--save_every', default=5000)
 @click.option('--num_workers', default=4)
-def main(model_dir, epochs, batch_size, lr, eval_every, generate_every, save_every, num_workers):
+def main(model_dir, epochs, batch_size, lr, momentum, warmup, max_iters, eval_every, generate_every, save_every, num_workers):
 
     datasets = {'train': Celebs(db_path='datasets/train_db', transform=transform_train),
                 'val': LFW(path='datasets/lfw.bin', transform=transform_val)}
@@ -41,6 +44,9 @@ def main(model_dir, epochs, batch_size, lr, eval_every, generate_every, save_eve
                       g_optimizer=FusedSGD,
                       d_optimizer=FusedSGD,
                       lr=lr,
+                      momentum=momentum,
+                      warmup=warmup,
+                      max_iters=max_iters,
                       num_classes=datasets['train'].num_classes)
     
     trainer.load_discriminator('checkpoints/mobiface_gan_mae', load_last=True)

@@ -19,7 +19,7 @@ from model.generator import Generator
 from model.discriminator import Discriminator
 
 class Trainer(nn.Module):
-    def __init__(self, model_dir, g_optimizer, d_optimizer, lr, num_classes):
+    def __init__(self, model_dir, g_optimizer, d_optimizer, lr, momentum, warmup, max_iters, num_classes):
         super().__init__()
         self.model_dir = model_dir
         if not os.path.exists(f'checkpoints/{model_dir}'):
@@ -37,7 +37,7 @@ class Trainer(nn.Module):
         self.mae_criterion = nn.SmoothL1Loss()
         self.bce_criterion = nn.BCEWithLogitsLoss()
         self.ce_criterion = nn.CrossEntropyLoss()
-        self.generator_mae_weight = 0.01
+        self.generator_mae_weight = 0.1
         self.generator_bce_weight = 0.01
         self.generator_ce_weight = 1
         self.discriminator_bce_real_weight = 0.01
@@ -45,8 +45,9 @@ class Trainer(nn.Module):
         self.discriminator_ce_weight = 1
 
         self.lr = lr
-        self.g_optimizer = g_optimizer(self.generator.parameters(), lr=lr, momentum=0.9)
-        self.d_optimizer = d_optimizer(self.discriminator.parameters(), lr=lr, momentum=0.9)
+        self.warmup = warmup
+        self.g_optimizer = g_optimizer(self.generator.parameters(), lr=lr, momentum=momentum)
+        self.d_optimizer = d_optimizer(self.discriminator.parameters(), lr=lr, momentum=momentum)
 
         (self.generator, self.discriminator), (self.g_optimizer, self.d_optimizer) = amp.initialize([self.generator, self.discriminator],
                                                                                                     [self.g_optimizer, self.d_optimizer],
@@ -54,7 +55,7 @@ class Trainer(nn.Module):
                                                                                                     num_losses=6)
 
         self._iter = nn.Parameter(torch.tensor(1), requires_grad=False)
-        self.max_iters = 100000
+        self.max_iters = max_iters
 
         if torch.cuda.is_available():
             self.cuda()
@@ -251,11 +252,11 @@ class Trainer(nn.Module):
         stats = {f'{type}_lr' : optimizer.param_groups[0]['lr']}
         return stats
 
-    def adjust_lr(self, optimizer, warmup=5000):
-        if self.iter <= warmup:
-            lr = self.lr * self.iter / warmup 
+    def adjust_lr(self, optimizer):
+        if self.iter <= self.warmup:
+            lr = self.lr * self.iter / self.warmup 
         else:
-            lr = self.lr * (1 + cos(pi * (self.iter - warmup) / (self.max_iters - warmup))) / 2
+            lr = self.lr * (1 + cos(pi * (self.iter - self.warmup) / (self.max_iters - self.warmup))) / 2
         
         for group in optimizer.param_groups:
             group['lr'] = lr
