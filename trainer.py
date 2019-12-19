@@ -4,7 +4,7 @@ import random
 from math import cos, pi
 from tqdm import tqdm
 import numpy as np
-import sklearn.metrics as metrics
+from sklearn.metrics import accuracy_score, roc_curve
 
 import torch
 import torch.nn as nn
@@ -37,11 +37,11 @@ class Trainer(nn.Module):
         self.mae_criterion = nn.SmoothL1Loss()
         self.bce_criterion = nn.BCEWithLogitsLoss()
         self.ce_criterion = nn.CrossEntropyLoss()
-        self.generator_mae_weight = 0.1
-        self.generator_bce_weight = 0.01
+        self.generator_mae_weight = 150
+        self.generator_bce_weight = 1
         self.generator_ce_weight = 1
-        self.discriminator_bce_real_weight = 0.01
-        self.discriminator_bce_fake_weight = 0.01
+        self.discriminator_bce_real_weight = 1
+        self.discriminator_bce_fake_weight = 1
         self.discriminator_ce_weight = 1
 
         self.lr = lr
@@ -76,14 +76,14 @@ class Trainer(nn.Module):
         for batch in tqdm(dataloaders['train']):
             torch.Tensor.add_(self._iter, 1)
             # generator step
-            if self._iter % 2 == 0:
+            if self.iter % 2 == 0:
                 self.adjust_lr(self.g_optimizer)
                 g_losses = self.g_step(self.adapt(batch))
                 g_stats = self.get_opt_stats(self.g_optimizer, type='generator')
                 self.write_logs(losses=g_losses, stats=g_stats, type='generator')
 
             #discriminator step
-            if self._iter % 2 == 1:
+            if self.iter % 2 == 1:
                 self.adjust_lr(self.d_optimizer)
                 d_losses = self.d_step(self.adapt(batch))
                 d_stats = self.get_opt_stats(self.d_optimizer, type='discriminator')
@@ -92,9 +92,10 @@ class Trainer(nn.Module):
             if self.iter % eval_every == 0:
                 x, labels = batch
                 x = x.cuda()
-                metrics = self.evaluate(x)
-                self.write_logs(metrics=metrics)
-                metrics = self.evaluate_identification(dataloaders)
+                angles = self.evaluate_angles(x)
+                discriminator_acc = self.evaluate_discriminator_accuracy(x)
+                identification_acc = self.evaluate_identification(dataloaders)
+                metrics = {**angles, **discriminator_acc, **identification_acc}
                 self.write_logs(metrics=metrics)
 
             if self.iter % generate_every == 0:
@@ -168,7 +169,30 @@ class Trainer(nn.Module):
         bce_real = self.bce_criterion(real_realness_logit, torch.ones_like(real_realness_logit) - random.uniform(0.1, 0.3))
         return bce_fake, bce_real, ce_loss
 
-    def evaluate(self, x):
+    def evaluate_discriminator_accuracy(self, x):
+        src, tgt = torch.chunk(x, 2, dim=0)        
+
+        self.generator.eval()
+        with torch.no_grad():
+            fake = self.generator(src, tgt)
+        self.generator.train()
+        
+        self.discriminator.eval()
+        with torch.no_grad():
+            _, fake_realness_logit = self.discriminator(fake)
+            fake_acc = torch.mean((fake_realness_logit < 0).float())
+
+            _, real_realness_logit = self.discriminator(x)
+            real_acc = torch.mean((real_realness_logit > 0).float())
+        self.discriminator.train()
+
+        metrics = {
+            'fake_acc': fake_acc.item(),
+            'real_acc': real_acc.item()
+        }
+        return metrics
+    
+    def evaluate_angles(self, x):
         src, tgt = torch.chunk(x, 2, dim=0)        
 
         self.generator.eval()
@@ -193,20 +217,12 @@ class Trainer(nn.Module):
         tgt_fake_cos_distance = (tgt_emb * fake_emb).sum(dim=-1)
         tgt_fake_angle = torch.acos(tgt_fake_cos_distance) * (180/pi)
 
-        _, fake_realness_logit = self.discriminator(fake)
-        fake_acc = torch.mean((fake_realness_logit < 0).float())
-
-        _, real_realness_logit = self.discriminator(x)
-        real_acc = torch.mean((real_realness_logit > 0).float())
-
         metrics = {
             'src_fake_angle': src_fake_angle.mean().item(),
             'tgt_fake_angle': tgt_fake_angle.mean().item(),
-            'fake_acc': fake_acc.item(),
-            'real_acc': real_acc.item()
         }
         return metrics
-    
+
     def evaluate_identification(self, dataloaders):
         self.discriminator.eval()
         with torch.no_grad():
@@ -222,15 +238,16 @@ class Trainer(nn.Module):
             y_hat = (embs[0::2,:] * embs[1::2,:]).sum(1).numpy()
             y_true = np.array(dataloaders['val'].dataset.labels)
             
-            fpr, tpr, thresholds = metrics.roc_curve(y_true, y_hat)
+            fpr, tpr, thresholds = roc_curve(y_true, y_hat)
             optimal_idx = np.argmax(tpr - fpr)
             optimal_threshold = thresholds[optimal_idx]
-            acc = metrics.accuracy_score(y_true, y_hat > optimal_threshold)
+            acc = accuracy_score(y_true, y_hat > optimal_threshold)
         self.discriminator.train()
-        val_metrics = {
+
+        metrics = {
             'identification_acc': acc
         }
-        return val_metrics
+        return metrics
 
     def generate(self, x):
         src, tgt = torch.chunk(x, 2, dim=0)        
