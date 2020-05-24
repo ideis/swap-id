@@ -1,25 +1,27 @@
+import cv2
 import os
 import glob
 import random
 from math import cos, pi
 from tqdm import tqdm
 import numpy as np
-from sklearn.metrics import accuracy_score, roc_curve
 
 import torch
+import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 
 from apex import amp
-from apex.optimizers import FusedAdam
 
-from data.transforms import transform_inv
+from model.encoder.identity import ArcFaceNet, MobileFaceNet
 from model.generator import Generator
 from model.discriminator import Discriminator
+from loss import hinge_loss
+
 
 class Trainer(nn.Module):
-    def __init__(self, model_dir, g_optimizer, d_optimizer, lr, momentum, warmup, max_iters, num_classes):
+    def __init__(self, model_dir, g_optimizer, d_optimizer, lr, warmup, max_iters):
         super().__init__()
         self.model_dir = model_dir
         if not os.path.exists(f'checkpoints/{model_dir}'):
@@ -29,30 +31,30 @@ class Trainer(nn.Module):
             os.makedirs(self.logs_dir)
         self.writer = SummaryWriter(self.logs_dir)
 
-        self.generator = Generator()
-        self.discriminator = Discriminator(num_classes)
-        self.generator = self.generator.cuda()
-        self.discriminator = self.discriminator.cuda()
+        self.arcface = ArcFaceNet(50, 0.6, 'ir_se').cuda()
+        self.arcface.eval()
+        self.arcface.load_state_dict(torch.load('checkpoints/model_ir_se50.pth', map_location='cuda'), strict=False)
 
-        self.mae_criterion = nn.SmoothL1Loss()
-        self.bce_criterion = nn.BCEWithLogitsLoss()
-        self.ce_criterion = nn.CrossEntropyLoss()
-        self.generator_mae_weight = 150
-        self.generator_bce_weight = 1
-        self.generator_ce_weight = 1
-        self.discriminator_bce_real_weight = 1
-        self.discriminator_bce_fake_weight = 1
-        self.discriminator_ce_weight = 1
+        self.mobiface = MobileFaceNet(512).cuda()
+        self.mobiface.eval()
+        self.mobiface.load_state_dict(torch.load('checkpoints/mobilefacenet.pth', map_location='cuda'), strict=False)
+
+        self.generator = Generator().cuda()
+        self.discriminator = Discriminator().cuda()
+
+        self.adversarial_weight = 1
+        self.src_id_weight = 5
+        self.tgt_id_weight = 1
+        self.attributes_weight = 10
+        self.reconstruction_weight = 10
 
         self.lr = lr
         self.warmup = warmup
-        self.g_optimizer = g_optimizer(self.generator.parameters(), lr=lr, momentum=momentum)
-        self.d_optimizer = d_optimizer(self.discriminator.parameters(), lr=lr, momentum=momentum)
+        self.g_optimizer = g_optimizer(self.generator.parameters(), lr=lr, betas=(0, 0.999))
+        self.d_optimizer = d_optimizer(self.discriminator.parameters(), lr=lr, betas=(0, 0.999))
 
-        (self.generator, self.discriminator), (self.g_optimizer, self.d_optimizer) = amp.initialize([self.generator, self.discriminator],
-                                                                                                    [self.g_optimizer, self.d_optimizer],
-                                                                                                    opt_level="O1",
-                                                                                                    num_losses=6)
+        self.generator, self.g_optimizer = amp.initialize(self.generator, self.g_optimizer, opt_level="O1")
+        self.discriminator, self.d_optimizer = amp.initialize(self.discriminator, self.d_optimizer, opt_level="O1")
 
         self._iter = nn.Parameter(torch.tensor(1), requires_grad=False)
         self.max_iters = max_iters
@@ -76,194 +78,193 @@ class Trainer(nn.Module):
         for batch in tqdm(dataloaders['train']):
             torch.Tensor.add_(self._iter, 1)
             # generator step
-            if self.iter % 2 == 0:
-                self.adjust_lr(self.g_optimizer)
-                g_losses = self.g_step(self.adapt(batch))
-                g_stats = self.get_opt_stats(self.g_optimizer, type='generator')
-                self.write_logs(losses=g_losses, stats=g_stats, type='generator')
+            # if self.iter % 2 == 0:
+            # self.adjust_lr(self.g_optimizer)
+            g_losses = self.g_step(self.adapt(batch))
+            g_stats = self.get_opt_stats(self.g_optimizer, type='generator')
+            self.write_logs(losses=g_losses, stats=g_stats, type='generator')
 
-            #discriminator step
-            if self.iter % 2 == 1:
-                self.adjust_lr(self.d_optimizer)
-                d_losses = self.d_step(self.adapt(batch))
-                d_stats = self.get_opt_stats(self.d_optimizer, type='discriminator')
-                self.write_logs(losses=d_losses, stats=d_stats, type='discriminator')
+            # #discriminator step
+            # if self.iter % 2 == 1:
+            # self.adjust_lr(self.d_optimizer)
+            d_losses = self.d_step(self.adapt(batch))
+            d_stats = self.get_opt_stats(self.d_optimizer, type='discriminator')
+            self.write_logs(losses=d_losses, stats=d_stats, type='discriminator')
 
             if self.iter % eval_every == 0:
-                x, labels = batch
-                x = x.cuda()
-                angles = self.evaluate_angles(x)
-                discriminator_acc = self.evaluate_discriminator_accuracy(x)
-                identification_acc = self.evaluate_identification(dataloaders)
-                metrics = {**angles, **discriminator_acc, **identification_acc}
+                discriminator_acc = self.evaluate_discriminator_accuracy(dataloaders['val'])
+                identification_acc = self.evaluate_identification_similarity(dataloaders['val'])
+                metrics = {**discriminator_acc, **identification_acc}
                 self.write_logs(metrics=metrics)
 
             if self.iter % generate_every == 0:
-                x, labels = batch
-                x = x[:2, ...].cuda()
-                self.generate(x)
+                self.generate(*self.adapt(batch))
 
             if self.iter % save_every == 0:
                 self.save_discriminator()
                 self.save_generator()
 
     def g_step(self, batch):
+        self.generator.train()
         self.g_optimizer.zero_grad()
-        mae_loss, bce_loss, ce_loss = self.g_loss(*batch)
-        with amp.scale_loss(mae_loss * self.generator_mae_weight, self.g_optimizer, loss_id=0) as scaled_loss:
-            scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(bce_loss * self.generator_bce_weight, self.g_optimizer, loss_id=1) as scaled_loss:
-            scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(ce_loss * self.generator_ce_weight, self.g_optimizer, loss_id=2) as scaled_loss:
+        L_adv, L_src_id, L_tgt_id, L_attr, L_rec, L_generator = self.g_loss(*batch)
+        with amp.scale_loss(L_generator, self.g_optimizer) as scaled_loss:
             scaled_loss.backward()
         self.g_optimizer.step()
 
         losses = {
-            'mae': self.generator_mae_weight * mae_loss.item(),
-            'bce_fake': self.generator_bce_weight * bce_loss.item(),
-            'ce':  self.generator_ce_weight * ce_loss.item()
+            'adv': L_adv.item(),
+            'src_id':  L_src_id.item(),
+            'tgt_id':  L_tgt_id.item(),
+            'attributes':  L_attr.item(),
+            'reconstruction': L_rec.item(),
+            'total_loss': L_generator.item()
         }
         return losses
 
     def d_step(self, batch):
+        self.discriminator.train()
         self.d_optimizer.zero_grad()
-        bce_fake, bce_real, ce_loss = self.d_loss(*batch)
-        with amp.scale_loss(bce_fake * self.discriminator_bce_fake_weight, self.d_optimizer, loss_id=3) as scaled_loss:
-            scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(bce_real * self.discriminator_bce_real_weight, self.d_optimizer, loss_id=4) as scaled_loss:
-            scaled_loss.backward(retain_graph=True)
-        with amp.scale_loss(ce_loss * self.discriminator_ce_weight, self.d_optimizer, loss_id=5) as scaled_loss:
+        L_fake, L_real, L_discriminator = self.d_loss(*batch)
+        with amp.scale_loss(L_discriminator, self.d_optimizer) as scaled_loss:
             scaled_loss.backward()
         self.d_optimizer.step()
 
         losses = {
-            'bce_real': self.discriminator_bce_real_weight * bce_real.item(),
-            'bce_fake': self.discriminator_bce_fake_weight * bce_fake.item(),
-            'ce': self.discriminator_ce_weight * ce_loss.item()
+            'hinge_fake': L_fake.item(),
+            'hinge_real': L_real.item(),
+            'total_loss': L_discriminator.item()
         }
         return losses
 
-    def g_loss(self, x, labels):
-        src, tgt = torch.chunk(x, 2, dim=0)
-        src_label, tgt_label = torch.chunk(labels, 2)
+    def g_loss(self, Xs, Xt, same_person):
+        with torch.no_grad():
+            src_embed = self.arcface(F.interpolate(Xs[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+            tgt_embed = self.arcface(F.interpolate(Xt[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
 
-        fake = self.generator(src, tgt)
-        mae_loss = self.mae_criterion(fake, src)
+        Y_hat, Xt_attr = self.generator(Xt, src_embed, return_attributes=True)        
 
-        logits, fake_realness_logit  = self.discriminator(fake, tgt_label)
-        bce_loss = self.bce_criterion(fake_realness_logit, torch.ones_like(fake_realness_logit) - random.uniform(0.1, 0.3))
-        ce_loss = self.ce_criterion(logits, tgt_label)
-        return mae_loss, bce_loss, ce_loss
+        Di = self.discriminator(Y_hat)
+
+        L_adv = 0
+        for di in Di:
+            L_adv += hinge_loss(di[0], True)
+
+        fake_embed = self.arcface(F.interpolate(Y_hat[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+        L_src_id =(1 - torch.cosine_similarity(src_embed, fake_embed, dim=1)).mean()
+        L_tgt_id =(1 - torch.cosine_similarity(tgt_embed, fake_embed, dim=1)).mean()
+
+        batch_size = Xs.shape[0]
+        Y_hat_attr = self.generator.get_attr(Y_hat)
+        L_attr = 0
+        for i in range(len(Xt_attr)):
+            L_attr += torch.mean(torch.pow(Xt_attr[i] - Y_hat_attr[i], 2).reshape(batch_size, -1), dim=1).mean()
+        L_attr /= 2.0
+
+        L_rec = torch.sum(0.5 * torch.mean(torch.pow(Y_hat - Xt, 2).reshape(batch_size, -1), dim=1) * same_person) / (same_person.sum() + 1e-6)
+        L_generator = (self.adversarial_weight * L_adv) + (self.src_id_weight * L_src_id) + (self.tgt_id_weight * L_tgt_id) + (self.attributes_weight * L_attr) + (self.reconstruction_weight * L_rec)
+        return L_adv, L_src_id, L_tgt_id, L_attr, L_rec, L_generator
     
-    def d_loss(self, x, labels):
-        src, tgt = torch.chunk(x, 2, dim=0)
+    def d_loss(self, Xs, Xt, same_person):
         with torch.no_grad():
-            fake = self.generator(src, tgt)
+            src_embed = self.arcface(F.interpolate(Xs[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+        Y_hat = self.generator(Xt, src_embed, return_attributes=False)
+          
+        fake_D = self.discriminator(Y_hat.detach())
+        L_fake = 0
+        for di in fake_D:
+            L_fake += hinge_loss(di[0], False)
+        real_D = self.discriminator(Xs)
+        L_real = 0
+        for di in real_D:
+            L_real += hinge_loss(di[0], True)
 
-        logits, real_realness_logit  = self.discriminator(x, labels)
-        ce_loss = self.ce_criterion(logits, labels)
+        L_discriminator = 0.5*(L_real + L_fake)
+        return L_fake, L_real, L_discriminator
 
-        _, fake_realness_logit = self.discriminator(fake)
-
-        bce_fake = self.bce_criterion(fake_realness_logit, torch.zeros_like(fake_realness_logit) + random.uniform(0.1, 0.3))
-        bce_real = self.bce_criterion(real_realness_logit, torch.ones_like(real_realness_logit) - random.uniform(0.1, 0.3))
-        return bce_fake, bce_real, ce_loss
-
-    def evaluate_discriminator_accuracy(self, x):
-        src, tgt = torch.chunk(x, 2, dim=0)        
-
+    def evaluate_discriminator_accuracy(self, val_dataloader):
+        real_acc = 0
+        fake_acc = 0
         self.generator.eval()
-        with torch.no_grad():
-            fake = self.generator(src, tgt)
+        self.discriminator.eval()
+        for batch in tqdm(val_dataloader):
+            Xs, Xt, _ = self.adapt(batch)
+
+            with torch.no_grad():
+                embed = self.arcface(F.interpolate(Xs[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+                Y_hat = self.generator(Xt, embed, return_attributes=False)                
+                fake_D = self.discriminator(Y_hat)
+                real_D = self.discriminator(Xs)
+
+            fake_multiscale_acc = 0
+            for di in fake_D:
+                fake_multiscale_acc += torch.mean((di[0] < 0).float())
+            fake_acc += fake_multiscale_acc / len(fake_D)
+
+            real_multiscale_acc = 0
+            for di in real_D:
+                real_multiscale_acc += torch.mean((di[0] > 0).float())
+            real_acc += real_multiscale_acc / len(real_D)
+                
         self.generator.train()
+        self.discriminator.train()
         
-        self.discriminator.eval()
-        with torch.no_grad():
-            _, fake_realness_logit = self.discriminator(fake)
-            fake_acc = torch.mean((fake_realness_logit < 0).float())
-
-            _, real_realness_logit = self.discriminator(x)
-            real_acc = torch.mean((real_realness_logit > 0).float())
-        self.discriminator.train()
-
         metrics = {
-            'fake_acc': fake_acc.item(),
-            'real_acc': real_acc.item()
+            'fake_acc': 100 * (fake_acc / len(val_dataloader)).item(),
+            'real_acc': 100 * (real_acc / len(val_dataloader)).item()
         }
         return metrics
     
-    def evaluate_angles(self, x):
-        src, tgt = torch.chunk(x, 2, dim=0)        
-
+    def evaluate_identification_similarity(self, val_dataloader):
+        src_id_sim = 0
+        tgt_id_sim = 0
         self.generator.eval()
-        with torch.no_grad():
-            fake = self.generator(src, tgt)
-        self.generator.train()
+        for batch in tqdm(val_dataloader):
+            Xs, Xt, _ = self.adapt(batch)
+            with torch.no_grad():
+                src_embed = self.arcface(F.interpolate(Xs[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+                Y_hat = self.generator(Xt, src_embed, return_attributes=False)
 
-        self.discriminator.eval()
-        with torch.no_grad():
-            src_emb, _  = self.discriminator(src)
-            tgt_emb, _  = self.discriminator(tgt)
-            fake_emb, _ = self.discriminator(fake)
-        self.discriminator.train()
-
-        src_emb = F.normalize(src_emb)
-        tgt_emb = F.normalize(tgt_emb)
-        fake_emb = F.normalize(fake_emb)
-
-        src_fake_cos_distance = (src_emb * fake_emb).sum(dim=-1)
-        src_fake_angle = torch.acos(src_fake_cos_distance) * (180/pi)
-
-        tgt_fake_cos_distance = (tgt_emb * fake_emb).sum(dim=-1)
-        tgt_fake_angle = torch.acos(tgt_fake_cos_distance) * (180/pi)
-
-        metrics = {
-            'src_fake_angle': src_fake_angle.mean().item(),
-            'tgt_fake_angle': tgt_fake_angle.mean().item(),
-        }
-        return metrics
-
-    def evaluate_identification(self, dataloaders):
-        self.discriminator.eval()
-        with torch.no_grad():
-            embs= []
-            for x in tqdm(dataloaders['val']):
-                x = x.cuda()
-                emb, _ = self.discriminator(x)
-                emb = emb.cpu()
-                embs.append(emb)
-            embs = torch.cat(embs, 0)
-            embs = F.normalize(embs)
-
-            y_hat = (embs[0::2,:] * embs[1::2,:]).sum(1).numpy()
-            y_true = np.array(dataloaders['val'].dataset.labels)
+                src_embed = self.mobiface(F.interpolate(Xs[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+                tgt_embed = self.mobiface(F.interpolate(Xt[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+                fake_embed = self.mobiface(F.interpolate(Y_hat[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
             
-            fpr, tpr, thresholds = roc_curve(y_true, y_hat)
-            optimal_idx = np.argmax(tpr - fpr)
-            optimal_threshold = thresholds[optimal_idx]
-            acc = accuracy_score(y_true, y_hat > optimal_threshold)
-        self.discriminator.train()
+            src_id_sim += (torch.cosine_similarity(src_embed, fake_embed, dim=1)).float().mean()
+            tgt_id_sim += (torch.cosine_similarity(tgt_embed, fake_embed, dim=1)).float().mean()
+
+        self.generator.train()
 
         metrics = {
-            'identification_acc': acc
+            'src_similarity': 100 * (src_id_sim / len(val_dataloader)).item(),
+            'tgt_similarity': 100 * (tgt_id_sim / len(val_dataloader)).item()
         }
         return metrics
 
-    def generate(self, x):
-        src, tgt = torch.chunk(x, 2, dim=0)        
-        x = torch.cat([src, tgt], dim=1)
+    def generate(self, Xs, Xt, same_person):
 
-        self.generator.eval()
-        fake = self.generator(src, tgt)
-        self.generator.train()
+        def get_grid_image(X):
+            X = X[:8]
+            X = torchvision.utils.make_grid(X.detach().cpu(), nrow=X.shape[0])
+            X = (X * 0.5 + 0.5) * 255
+            return X
 
-        img_tensors = torch.cat([src, fake, tgt], dim=3)
-        img_tensors = img_tensors.squeeze(0).cpu()
-        imgs = transform_inv(img_tensors)
+        def make_image(Xs, Xt, Y_hat):
+            Xs = get_grid_image(Xs)
+            Xt = get_grid_image(Xt)
+            Y_hat = get_grid_image(Y_hat)
+            return torch.cat((Xs, Xt, Y_hat), dim=1).numpy()
 
+        with torch.no_grad():
+            embed = self.arcface(F.interpolate(Xs[:, :, 19:237, 19:237], [112, 112], mode='bilinear', align_corners=True))
+            self.generator.eval()
+            Y_hat = self.generator(Xt, embed, return_attributes=False)
+            self.generator.train()
+        
+        image = make_image(Xs, Xt, Y_hat)
         if not os.path.exists(f'results/{self.model_dir}'):
             os.makedirs(f'results/{self.model_dir}')
-        imgs.save(f'results/{self.model_dir}/{self.iter}.png')
+        cv2.imwrite(f'results/{self.model_dir}/{self.iter}.jpg', image.transpose([1,2,0]))
+
 
     def get_opt_stats(self, optimizer, type=''):
         stats = {f'{type}_lr' : optimizer.param_groups[0]['lr']}
