@@ -2,141 +2,135 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# input 112x112
-# sizes 112 56 28 14 7 14 28 56 112
+from model.encoder.attributes import AttributesEncoder
 
-class ConvBNReLU(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
-        self.bn = nn.InstanceNorm2d(out_channels, affine=True)
-        self.relu = nn.LeakyReLU(negative_slope=0.01, inplace=False)
-    
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.bn(x)
-        x = self.relu(x)
+
+class AADLayer(nn.Module):
+    def __init__(self, c_in, c_attr, c_id=512):
+        super(AADLayer, self).__init__()
+        self.c_attr = c_attr
+        self.c_id = c_id
+        self.c_in = c_in
+
+        self.conv1 = nn.Conv2d(c_attr, c_in, kernel_size=1, stride=1, padding=0, bias=True)
+        self.conv2 = nn.Conv2d(c_attr, c_in, kernel_size=1, stride=1, padding=0, bias=True)
+        self.fc1 = nn.Linear(c_id, c_in)
+        self.fc2 = nn.Linear(c_id, c_in)
+        self.norm = nn.InstanceNorm2d(c_in, affine=False)
+
+        self.conv_h = nn.Conv2d(c_in, 1, kernel_size=1, stride=1, padding=0, bias=True)
+
+    def forward(self, h_in, z_attr, z_id):
+        h = self.norm(h_in)
+
+        # attributes integration
+        gamma_attr = self.conv1(z_attr)
+        beta_attr = self.conv2(z_attr)
+        A = gamma_attr * h + beta_attr
+
+        # identity integration
+        gamma_id = self.fc1(z_id)
+        beta_id = self.fc2(z_id)
+        gamma_id = gamma_id.reshape(h.shape[0], self.c_x, 1, 1).expand_as(h)
+        beta_id = beta_id.reshape(h.shape[0], self.c_x, 1, 1).expand_as(h)
+        I = gamma_id * h + beta_id
+
+        # adaptively attention mask
+        M = torch.sigmoid(self.conv_h(h))
+        out = (torch.ones_like(M).to(M.device) - M) * A + M * I
+        return out
+
+
+class AADBlock(nn.Module):
+    def __init__(self, cin, cout, c_attr, c_id=512):
+        super(AADBlock, self).__init__()
+        self.cin = cin
+        self.cout = cout
+
+        self.AAD1 = AADLayer(cin, c_attr, c_id)
+        self.conv1 = nn.Conv2d(cin, cin, kernel_size=3, stride=1, padding=1, bias=False)
+        self.relu1 = nn.ReLU(inplace=True)
+
+        self.AAD2 = AADLayer(cin, c_attr, c_id)
+        self.conv2 = nn.Conv2d(cin, cout, kernel_size=3, stride=1, padding=1, bias=False)
+        self.relu2 = nn.ReLU(inplace=True)
+
+        if cin != cout:
+            self.AAD3 = AADLayer(cin, c_attr, c_id)
+            self.conv3 = nn.Conv2d(cin, cout, kernel_size=3, stride=1, padding=1, bias=False)
+            self.relu3 = nn.ReLU(inplace=True)
+
+    def forward(self, h, z_attr, z_id):
+        x = self.AAD1(h, z_attr, z_id)
+        x = self.relu1(x)
+        x = self.conv1(x)
+
+        x = self.AAD2(x,z_attr, z_id)
+        x = self.relu2(x)
+        x = self.conv2(x)
+
+        if self.cin != self.cout:
+            h = self.AAD3(h, z_attr, z_id)
+            h = self.relu3(h)
+            h = self.conv3(h)
+        x = x + h
+        
         return x
 
 
-class DownsamplingBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.conv_bn_relu = ConvBNReLU(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
-
-    def forward(self, x):
-        return self.conv_bn_relu(x)
-
-
-class BottleneckBlock(nn.Module):
-    def __init__(self, channels):
-        super().__init__()
-        self.conv_bn_relu1 = ConvBNReLU(channels, channels, kernel_size=3, stride=1, padding=1)
-        self.conv_bn_relu2 = ConvBNReLU(channels, channels, kernel_size=3, stride=1, padding=1)
-
-    def forward(self, x):
-        return x + self.conv_bn_relu2(self.conv_bn_relu1(x))
-
-
-class UpsamplingBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.up = nn.UpsamplingNearest2d(scale_factor=2)
-        self.conv_bn_relu = ConvBNReLU(in_channels, out_channels, kernel_size=3, stride=1, padding=0)
-
-    def forward(self, x):
-        x = self.up(x)
-        x = F.pad(x, pad=[1, 1, 1, 1], mode='replicate')
-        x = self.conv_bn_relu(x)
-        return x
-
-
-class Downsampler(nn.Module):
-    def __init__(self, in_channels=16, n_blocks=3):
-        super().__init__()
-        self.conv = nn.Conv2d(3, in_channels, kernel_size=3, stride=1, padding=1)
-
-        blocks = list()
-        for i in range(n_blocks):
-            out_channels = 2 * in_channels
-            blocks.append(DownsamplingBlock(in_channels, out_channels))
-            in_channels = 2 * in_channels
-        self.layers = nn.Sequential(*blocks)
-    
-    def forward(self, x):
-        return self.layers(self.conv(x))
-
-
-class Bottleneck(nn.Module):
-    def __init__(self, channels, n_blocks):
-        super().__init__()
-        blocks = list()
-        for i in range(n_blocks):
-            blocks.append(BottleneckBlock(channels))
-        self.layers = nn.Sequential(*blocks)
-
-    def forward(self, x):
-        return self.layers(x)
-
-
-class Encoder(nn.Module):
-    def __init__(self, parallel_channels=128, concat_channels=256, parallel_blocks=4, concat_blocks=8):
-        super().__init__()
-        self.downsampler = Downsampler()
-        self.src_bottleneck = Bottleneck(parallel_channels, parallel_blocks)
-        self.tgt_bottleneck = Bottleneck(parallel_channels, parallel_blocks)
-        self.bottleneck = Bottleneck(concat_channels, concat_blocks)
-
-    def forward(self, src, tgt):
-        src = self.downsampler(src)
-        tgt = self.downsampler(tgt)
-        src = self.src_bottleneck(src)
-        tgt = self.tgt_bottleneck(tgt)
-        x = torch.cat([src, tgt], dim=1)
-        x = self.bottleneck(x)
-        return x
-
-
-class Decoder(nn.Module):
-    def __init__(self, in_channels=256, n_blocks=3):
-        super().__init__()
-        blocks = list()
-        for i in range(n_blocks):
-            out_channels = in_channels // 2
-            blocks.append(UpsamplingBlock(in_channels, out_channels))
-            in_channels = in_channels // 2
-        self.layers = nn.Sequential(*blocks)
-
-        self.conv = nn.Conv2d(out_channels, 4, kernel_size=3, stride=1, padding=1)
-      
-    def forward(self, x):
-        return self.conv(self.layers(x))
-
-
-class Generator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.encoder = Encoder()
-        self.decoder = Decoder()
+class AADGenerator(nn.Module):
+    def __init__(self, c_id=512):
+        super(AADGenerator, self).__init__()
+        self.up1 = nn.ConvTranspose2d(c_id, 1024, kernel_size=2, stride=1, padding=0)
+        self.AADBlock1 = AADBlock(1024, 1024, 1024, c_id)
+        self.AADBlock2 = AADBlock(1024, 1024, 2048, c_id)
+        self.AADBlock3 = AADBlock(1024, 1024, 1024, c_id)
+        self.AADBlock4 = AADBlock(1024, 512, 512, c_id)
+        self.AADBlock5 = AADBlock(512, 256, 256, c_id)
+        self.AADBlock6 = AADBlock(256, 128, 128, c_id)
+        self.AADBlock7 = AADBlock(128, 64, 64, c_id)
+        self.AADBlock8 = AADBlock(64, 3, 64, c_id)
 
         self.init_parameters()
 
-    def forward(self, src, tgt):
-        x = self.encoder(src, tgt)
-        x = self.decoder(x)
-        res, mask = torch.split(x, 3, dim=1)
-        res = torch.tanh(res)
-        mask = torch.sigmoid(mask)
-        fake = mask * res + (1 - mask) * src
-        return fake
-
     def init_parameters(self):
         for m in self.modules():
+            if isinstance(m, nn.Linear):
+                m.weight.data.normal_(0, 0.001)
+                m.bias.data.zero_()
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
+                nn.init.xavier_normal_(m.weight.data)
 
+            if isinstance(m, nn.ConvTranspose2d):
+                nn.init.xavier_normal_(m.weight.data)
+
+    def forward(self, z_attr, z_id):
+        m = self.up1(z_id.reshape(z_id.shape[0], -1, 1, 1))
+    
+        m2 = F.interpolate(self.AADBlock1(m,  z_attr[0], z_id), scale_factor=2, mode='bilinear', align_corners=True)
+        m3 = F.interpolate(self.AADBlock2(m2, z_attr[1], z_id), scale_factor=2, mode='bilinear', align_corners=True)
+        m4 = F.interpolate(self.AADBlock3(m3, z_attr[2], z_id), scale_factor=2, mode='bilinear', align_corners=True)
+        m5 = F.interpolate(self.AADBlock4(m4, z_attr[3], z_id), scale_factor=2, mode='bilinear', align_corners=True)
+        m6 = F.interpolate(self.AADBlock5(m5, z_attr[4], z_id), scale_factor=2, mode='bilinear', align_corners=True)
+        m7 = F.interpolate(self.AADBlock6(m6, z_attr[5], z_id), scale_factor=2, mode='bilinear', align_corners=True)
+        m8 = F.interpolate(self.AADBlock7(m7, z_attr[6], z_id), scale_factor=2, mode='bilinear', align_corners=True)
+        y = self.AADBlock8(m8, z_attr[7], z_id)
+        return torch.tanh(y)
+
+
+class Generator(nn.Module):
+    def __init__(self, c_id=512):
+        super(Generator, self).__init__()
+        self.encoder = AttributesEncoder()
+        self.generator = AADGenerator(c_id)
+
+    def forward(self, Xt, z_id, return_attributes=True):
+        attr = self.encoder(Xt)
+        Y_hat = self.generator(attr, z_id)
+        if return_attributes:
+            return Y_hat, attr
+        else:
+            return Y_hat
+
+    def get_attr(self, X):
+        return self.encoder(X)
