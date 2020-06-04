@@ -15,8 +15,8 @@ from torch.utils.tensorboard import SummaryWriter
 from apex import amp
 
 from model.encoder.identity import ArcFaceNet, MobileFaceNet
-from model.generator import Generator
-from model.discriminator import Discriminator
+from model.generator import AEI_Net
+from model.discriminator import MultiscaleDiscriminator
 from loss import hinge_loss
 
 
@@ -39,8 +39,8 @@ class Trainer(nn.Module):
         self.mobiface.eval()
         self.mobiface.load_state_dict(torch.load('checkpoints/mobilefacenet.pth', map_location='cuda'), strict=False)
 
-        self.generator = Generator().cuda()
-        self.discriminator = Discriminator().cuda()
+        self.generator = AEI_Net().cuda()
+        self.discriminator = MultiscaleDiscriminator(input_nc=3, n_layers=6, norm_layer=torch.nn.InstanceNorm2d).cuda()
 
         self.adversarial_weight = 1
         self.src_id_weight = 5

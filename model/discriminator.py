@@ -1,69 +1,104 @@
-import math
 import torch
 import torch.nn as nn
+import numpy as np
 
-class ConvNet(nn.Module):
-    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d):
-        super(ConvNet, self).__init__()
+
+class NLayerDiscriminator(nn.Module):
+    def __init__(self, input_nc, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d, use_sigmoid=False, getIntermFeat=False):
+        super(NLayerDiscriminator, self).__init__()
+        self.getIntermFeat = getIntermFeat
         self.n_layers = n_layers
-        
-        kernel_size = 4
-        padding = math.ceil((kernel_size - 1.0) / 2)
-        sequence = [[nn.Conv2d(input_nc, ndf, kernel_size=kernel_size, stride=2, padding=padding), nn.LeakyReLU(0.2, True)]]
+
+        kw = 4
+        padw = int(np.ceil((kw-1.0)/2))
+        sequence = [[nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw), nn.LeakyReLU(0.2, True)]]
 
         nf = ndf
         for n in range(1, n_layers):
             nf_prev = nf
             nf = min(nf * 2, 512)
             sequence += [[
-                nn.Conv2d(nf_prev, nf, kernel_size=kernel_size, stride=2, padding=padding),
-                norm_layer(nf),
-                nn.LeakyReLU(0.2, True)
+                nn.Conv2d(nf_prev, nf, kernel_size=kw, stride=2, padding=padw),
+                norm_layer(nf), nn.LeakyReLU(0.2, True)
             ]]
 
         nf_prev = nf
         nf = min(nf * 2, 512)
         sequence += [[
-            nn.Conv2d(nf_prev, nf, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv2d(nf_prev, nf, kernel_size=kw, stride=1, padding=padw),
             norm_layer(nf),
             nn.LeakyReLU(0.2, True)
         ]]
 
-        sequence += [[nn.Conv2d(nf, 1, kernel_size=kernel_size, stride=1, padding=padding)]]
+        sequence += [[nn.Conv2d(nf, 1, kernel_size=kw, stride=1, padding=padw)]]
 
-        sequence_stream = []
-        for n in range(len(sequence)):
-            sequence_stream += sequence[n]
-        self.model = nn.Sequential(*sequence_stream)
+        if use_sigmoid:
+            sequence += [[nn.Sigmoid()]]
 
-        self.init_parameters()
+        if getIntermFeat:
+            for n in range(len(sequence)):
+                setattr(self, 'model'+str(n), nn.Sequential(*sequence[n]))
+        else:
+            sequence_stream = []
+            for n in range(len(sequence)):
+                sequence_stream += sequence[n]
+            self.model = nn.Sequential(*sequence_stream)
+
     def forward(self, input):
-        return self.model(input)
+        if self.getIntermFeat:
+            res = [input]
+            for n in range(self.n_layers+2):
+                model = getattr(self, 'model'+str(n))
+                res.append(model(res[-1]))
+            return res[1:]
+        else:
+            return self.model(input)
 
 
-    def init_parameters(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.xavier_normal_(m.weight.data)
-
-
-class Discriminator(nn.Module):
-    def __init__(self, input_nc=3, ndf=64, n_layers=6, n_scales=3, norm_layer=torch.nn.InstanceNorm2d):
-        super(Discriminator, self).__init__()
-        self.n_scales = n_scales
+class MultiscaleDiscriminator(nn.Module):
+    def __init__(self, input_nc=3, ndf=64, n_layers=3, norm_layer=nn.BatchNorm2d,
+                 use_sigmoid=False, num_D=3, getIntermFeat=False):
+        super(MultiscaleDiscriminator, self).__init__()
+        self.num_D = num_D
         self.n_layers = n_layers
+        self.getIntermFeat = getIntermFeat
 
-        for i in range(n_scales):
-            net = ConvNet(input_nc, ndf, n_layers, norm_layer)
-            setattr(self, 'layer' + str(i), net.model)
+        for i in range(num_D):
+            netD = NLayerDiscriminator(input_nc, ndf, n_layers, norm_layer, use_sigmoid, getIntermFeat)
+            if getIntermFeat:
+                for j in range(n_layers + 2):
+                    setattr(self, 'scale' + str(i) + '_layer' + str(j), getattr(netD, 'model' + str(j)))
+            else:
+                setattr(self, 'layer' + str(i), netD.model)
 
         self.downsample = nn.AvgPool2d(3, stride=2, padding=[1, 1], count_include_pad=False)
 
-    def forward(self, x):
+    def singleD_forward(self, model, input):
+        if self.getIntermFeat:
+            result = [input]
+            for i in range(len(model)):
+                result.append(model[i](result[-1]))
+            return result[1:]
+        else:
+            return [model(input)]
+
+    def forward(self, input):
+        num_D = self.num_D
         result = []
-        x_downsampled = x
-        for i in range(self.n_scales):
-            model = getattr(self, 'layer' + str(i))
-            result.append(model(x_downsampled))
-            x_downsampled = self.downsample(x_downsampled)
+        input_downsampled = input
+        for i in range(num_D):
+            if self.getIntermFeat:
+                model = [getattr(self, 'scale' + str(num_D - 1 - i) + '_layer' + str(j)) for j in
+                         range(self.n_layers + 2)]
+            else:
+                model = getattr(self, 'layer' + str(num_D - 1 - i))
+            result.append(self.singleD_forward(model, input_downsampled))
+            if i != (num_D - 1):
+                input_downsampled = self.downsample(input_downsampled)
         return result
+
+if __name__ == "__main__":
+    net = MultiscaleDiscriminator(input_nc=3, n_layers=6, norm_layer=torch.nn.InstanceNorm2d)
+    print(net)
+    x = torch.rand(1, 3, 256, 256)
+    print(x)
